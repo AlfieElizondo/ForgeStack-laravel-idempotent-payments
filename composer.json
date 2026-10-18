@@ -1,0 +1,43 @@
+{
+    "name": "forge-stack/laravel-idempotent-payments",
+    "description": "Idempotent payment intents and webhooks for LATAM gateways (MercadoPago, OpenPay) — pluggable gateway drivers, UNIQUE-constraint idempotency, zero framework route coupling.",
+    "type": "library",
+    "license": "MIT",
+    "keywords": ["laravel", "payments", "idempotency", "mercadopago", "openpay", "latam"],
+    "require": {
+        "php": "^8.3",
+        "illuminate/support": "^11.0|^12.0|^13.0",
+        "illuminate/database": "^11.0|^12.0|^13.0",
+        "illuminate/http": "^11.0|^12.0|^13.0"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^9.0|^10.0",
+        "phpunit/phpunit": "^11.0|^12.0",
+        "mockery/mockery": "^1.6"
+    },
+    "autoload": {
+        "psr-4": {
+            "ForgeStack\\IdempotentPayments\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "ForgeStack\\IdempotentPayments\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "ForgeStack\\IdempotentPayments\\IdempotentPaymentsServiceProvider"
+            ]
+        }
+    },
+    "scripts": {
+        "test": "phpunit"
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
