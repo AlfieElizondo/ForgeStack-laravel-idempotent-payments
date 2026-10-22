@@ -8,17 +8,25 @@ use ForgeStack\IdempotentPayments\Contracts\PaymentGatewayInterface;
 use ForgeStack\IdempotentPayments\DTOs\GatewayResponse;
 use ForgeStack\IdempotentPayments\DTOs\PaymentIntentData;
 use ForgeStack\IdempotentPayments\Enums\PaymentStatus;
+use ForgeStack\IdempotentPayments\Exceptions\PaymentFailedException;
 use Illuminate\Http\Request;
 
 /**
- * Zero-amount / free-tier gateway — synchronous capture, no checkout screen,
- * no external call. Useful for free plans/products where the gateway step
- * is a formality.
+ * Gateway de pruebas para totales de 0. No está pensado para producción: la
+ * tienda no tiene pedidos de total 0 (ADR-028, A8). Solo acepta un monto
+ * exactamente 0 y nunca acepta webhooks desde el exterior, porque no hay un
+ * proveedor que verifique su firma (P-03b).
  */
 class FreeGateway implements PaymentGatewayInterface
 {
     public function createIntent(PaymentIntentData $data): GatewayResponse
     {
+        if ($data->amount !== 0.0) {
+            throw PaymentFailedException::becauseGatewayRejected(
+                'FreeGateway only accepts a zero amount.'
+            );
+        }
+
         return new GatewayResponse(
             status: PaymentStatus::Pending,
             reference: 'FREE-' . strtoupper(substr($data->publicId, -8)),
@@ -37,6 +45,6 @@ class FreeGateway implements PaymentGatewayInterface
 
     public function validateWebhook(Request $request): bool
     {
-        return true;
+        return false;
     }
 }
