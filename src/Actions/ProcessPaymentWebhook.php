@@ -16,7 +16,8 @@ use Illuminate\Support\Facades\Log;
 
 /**
  * Processes an incoming payment webhook. Idempotent via a UNIQUE constraint
- * on payment_events(provider, event_id) — a duplicate webhook delivery
+ * on payment_events(provider, event_id), where the stored event_id is
+ * "{event_id}:{status}" (P-01) — a duplicate webhook delivery
  * (common with every real gateway) hits the UNIQUE, the insert fails
  * silently, and nothing gets mutated or re-dispatched twice. This is a DB
  * guarantee, not a status check — no race condition under concurrent
@@ -53,9 +54,11 @@ final class ProcessPaymentWebhook
             $provider, $eventId, $eventType, $rawBody, $response
         ) {
             try {
+                // P-01: la clave incluye el estado. El mismo aviso con el mismo estado es duplicado;
+                // el mismo id con un estado nuevo (pendiente → aprobado) se procesa.
                 $event = PaymentEvent::create([
                     'provider'     => $provider,
-                    'event_id'     => $eventId,
+                    'event_id'     => $eventId . ':' . $response->status->value,
                     'event_type'   => $eventType,
                     'processed_at' => now(),
                     'payload'      => $rawBody,
@@ -68,9 +71,12 @@ final class ProcessPaymentWebhook
                 return;
             }
 
-            $intent = $response->reference
-                ? PaymentIntent::where('provider_reference', $response->reference)->first()
-                : null;
+            // P-11: primero por public_id (external_reference); si la pasarela no lo trae, por provider_reference.
+            $intent = match (true) {
+                $response->intentPublicId !== null => PaymentIntent::where('public_id', $response->intentPublicId)->lockForUpdate()->first(),
+                $response->reference !== ''        => PaymentIntent::where('provider_reference', $response->reference)->lockForUpdate()->first(),
+                default                            => null,
+            };
 
             if (! $intent) {
                 Log::warning('[IdempotentPayments] Webhook with no matching intent', [
@@ -83,8 +89,14 @@ final class ProcessPaymentWebhook
 
             $event->update(['payment_intent_id' => $intent->id]);
 
-            if ($intent->status === PaymentStatus::Captured || $intent->status === PaymentStatus::Failed) {
-                return; // already terminal — never re-mutate
+            // P-08: solo Captured y Refunded son terminales. Un rechazo no lo es: en Checkout Pro el
+            // comprador puede reintentar con otra tarjeta y la aprobación llega después (Failed → Captured).
+            if ($intent->status === PaymentStatus::Captured || $intent->status === PaymentStatus::Refunded) {
+                return;
+            }
+
+            if ($intent->status === PaymentStatus::Failed && $response->isFailed()) {
+                return; // otro rechazo: PaymentFailed ya se despachó
             }
 
             if ($response->isSuccessful()) {

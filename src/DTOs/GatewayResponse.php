@@ -14,6 +14,9 @@ final readonly class GatewayResponse
         public ?string       $checkoutUrl  = null,
         public ?string       $errorMessage = null,
         public array         $rawPayload   = [],
+        // P-11: public_id del intent cuando la pasarela lo devuelve (external_reference en Mercado Pago).
+        // Tiene prioridad sobre $reference para encontrar el intent: el id del pago no es el de la preferencia.
+        public ?string       $intentPublicId = null,
     ) {}
 
     public function isSuccessful(): bool

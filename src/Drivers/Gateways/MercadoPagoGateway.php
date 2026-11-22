@@ -147,9 +147,13 @@ final class MercadoPagoGateway implements PaymentGatewayInterface
             $payment = $response->json();
 
             return new GatewayResponse(
-                status:     $this->mapStatus($payment['status'] ?? ''),
-                reference:  (string) $paymentId,
-                rawPayload: $payment,
+                status:         $this->mapStatus($payment['status'] ?? ''),
+                reference:      (string) $paymentId,
+                rawPayload:     $payment,
+                // P-11: la preferencia se creó con external_reference = public_id del intent.
+                intentPublicId: isset($payment['external_reference']) && $payment['external_reference'] !== ''
+                    ? (string) $payment['external_reference']
+                    : null,
             );
 
         } catch (Throwable $e) {
