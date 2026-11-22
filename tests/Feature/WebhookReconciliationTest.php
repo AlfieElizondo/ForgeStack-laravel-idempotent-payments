@@ -1,0 +1,168 @@
+<?php
+
+declare(strict_types=1);
+
+namespace ForgeStack\IdempotentPayments\Tests\Feature;
+
+use ForgeStack\IdempotentPayments\Actions\CreatePaymentIntent;
+use ForgeStack\IdempotentPayments\Actions\ProcessPaymentWebhook;
+use ForgeStack\IdempotentPayments\Contracts\PaymentGatewayInterface;
+use ForgeStack\IdempotentPayments\DTOs\GatewayResponse;
+use ForgeStack\IdempotentPayments\DTOs\PaymentIntentData;
+use ForgeStack\IdempotentPayments\Drivers\Gateways\FakeGateway;
+use ForgeStack\IdempotentPayments\Drivers\Gateways\MercadoPagoGateway;
+use ForgeStack\IdempotentPayments\Enums\PaymentStatus;
+use ForgeStack\IdempotentPayments\Events\PaymentCaptured;
+use ForgeStack\IdempotentPayments\Events\PaymentFailed;
+use ForgeStack\IdempotentPayments\Models\PaymentIntent;
+use ForgeStack\IdempotentPayments\Tests\TestCase;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Http;
+
+/**
+ * P-11, P-08 y P-01: el webhook encuentra su intent y aplica el estado correcto
+ * aunque lleguen varios avisos del mismo cobro.
+ */
+class WebhookReconciliationTest extends TestCase
+{
+    use RefreshDatabase;
+
+    public function test_a_mercadopago_webhook_finds_its_intent_through_the_external_reference(): void
+    {
+        // P-11: el intent guarda el id de la preferencia; el webhook trae el id del pago.
+        Http::fake([
+            'api.mercadopago.com/checkout/preferences' => Http::response(['id' => 'pref-1', 'init_point' => 'https://mp.test/pay'], 201),
+        ]);
+
+        $gateway = new MercadoPagoGateway(accessToken: 'TEST-token', webhookSecret: 'secret');
+        $intent = (new CreatePaymentIntent($gateway))->execute(
+            amount: 1500.0,
+            currency: 'MXN',
+            description: 'Pedido',
+            customerEmail: 'cliente@example.mx',
+            customerName: 'Cliente',
+        );
+        $this->assertSame('pref-1', $intent->provider_reference);
+
+        Http::fake([
+            'api.mercadopago.com/v1/payments/999' => Http::response([
+                'id' => 999,
+                'status' => 'approved',
+                'external_reference' => $intent->public_id,
+            ]),
+        ]);
+        Event::fake([PaymentCaptured::class]);
+
+        (new ProcessPaymentWebhook())->execute([
+            'gateway' => $gateway,
+            'provider' => 'mercadopago',
+            'event_id' => 'notification-1',
+            'event_type' => 'payment',
+            'payload' => ['type' => 'payment', 'data' => ['id' => '999']],
+        ]);
+
+        $this->assertSame(PaymentStatus::Captured, $intent->fresh()->status);
+        Event::assertDispatchedTimes(PaymentCaptured::class, 1);
+    }
+
+    public function test_an_approval_after_a_rejection_captures_the_intent(): void
+    {
+        // P-08: en Checkout Pro el comprador reintenta con otra tarjeta dentro de la misma preferencia.
+        $intent = $this->fakeIntent();
+        Event::fake([PaymentCaptured::class, PaymentFailed::class]);
+
+        $this->deliver($intent, 'evt-rejected', PaymentStatus::Failed);
+        $this->assertSame(PaymentStatus::Failed, $intent->fresh()->status);
+
+        $this->deliver($intent, 'evt-approved', PaymentStatus::Captured);
+
+        $this->assertSame(PaymentStatus::Captured, $intent->fresh()->status);
+        Event::assertDispatchedTimes(PaymentFailed::class, 1);
+        Event::assertDispatchedTimes(PaymentCaptured::class, 1);
+    }
+
+    public function test_a_rejection_after_a_capture_never_reverts_it(): void
+    {
+        $intent = $this->fakeIntent();
+        Event::fake([PaymentCaptured::class, PaymentFailed::class]);
+
+        $this->deliver($intent, 'evt-approved', PaymentStatus::Captured);
+        $this->deliver($intent, 'evt-rejected', PaymentStatus::Failed);
+
+        $this->assertSame(PaymentStatus::Captured, $intent->fresh()->status);
+        Event::assertNotDispatched(PaymentFailed::class);
+    }
+
+    public function test_a_second_rejection_does_not_dispatch_payment_failed_again(): void
+    {
+        $intent = $this->fakeIntent();
+        Event::fake([PaymentFailed::class]);
+
+        $this->deliver($intent, 'evt-rejected-1', PaymentStatus::Failed);
+        $this->deliver($intent, 'evt-rejected-2', PaymentStatus::Failed);
+
+        Event::assertDispatchedTimes(PaymentFailed::class, 1);
+    }
+
+    public function test_the_same_event_id_with_a_new_status_is_not_discarded_as_a_duplicate(): void
+    {
+        // P-01: el mismo id llega primero como pendiente y después como aprobado.
+        $intent = $this->fakeIntent();
+        Event::fake([PaymentCaptured::class]);
+
+        $this->deliver($intent, 'evt-1', PaymentStatus::Pending);
+        $this->deliver($intent, 'evt-1', PaymentStatus::Captured);
+        $this->deliver($intent, 'evt-1', PaymentStatus::Captured);
+
+        $this->assertSame(PaymentStatus::Captured, $intent->fresh()->status);
+        Event::assertDispatchedTimes(PaymentCaptured::class, 1);
+        $this->assertDatabaseCount('payment_events', 2);
+    }
+
+    private function fakeIntent(): PaymentIntent
+    {
+        return (new CreatePaymentIntent(new FakeGateway()))->execute(
+            amount: 500.0,
+            currency: 'MXN',
+            description: 'Pedido',
+            customerEmail: 'cliente@example.mx',
+            customerName: 'Cliente',
+        );
+    }
+
+    private function deliver(PaymentIntent $intent, string $eventId, PaymentStatus $status): void
+    {
+        (new ProcessPaymentWebhook())->execute([
+            'gateway' => $this->gatewayReturning($intent->provider_reference, $status),
+            'provider' => 'stub',
+            'event_id' => $eventId,
+            'event_type' => 'payment',
+            'payload' => [],
+        ]);
+    }
+
+    private function gatewayReturning(string $reference, PaymentStatus $status): PaymentGatewayInterface
+    {
+        return new class($reference, $status) implements PaymentGatewayInterface
+        {
+            public function __construct(private string $reference, private PaymentStatus $status) {}
+
+            public function createIntent(PaymentIntentData $data): GatewayResponse
+            {
+                throw new \LogicException('no se usa');
+            }
+
+            public function handleWebhook(array $payload): GatewayResponse
+            {
+                return new GatewayResponse(status: $this->status, reference: $this->reference);
+            }
+
+            public function validateWebhook(Request $request): bool
+            {
+                return true;
+            }
+        };
+    }
+}
