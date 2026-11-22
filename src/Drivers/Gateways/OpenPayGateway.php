@@ -47,6 +47,8 @@ final class OpenPayGateway implements PaymentGatewayInterface
         private readonly string $webhookUser     = '',
         private readonly string $webhookPassword = '',
         private readonly string $redirectUrl     = '',
+        /** P-02: sin credenciales de webhook, se rechaza. Aceptarlo sin autenticar exige este opt-in (solo desarrollo). */
+        private readonly bool   $allowUnsignedWebhooks = false,
     ) {}
 
     public function createIntent(PaymentIntentData $data): GatewayResponse
@@ -117,8 +119,13 @@ final class OpenPayGateway implements PaymentGatewayInterface
             ?? $payload['id']
             ?? null;
 
+        // P-04: el id se concatena en la URL de la API con credenciales; solo letras, números, guion y guion bajo.
+        if (! is_string($chargeId) || ! preg_match('/^[A-Za-z0-9_-]+$/', $chargeId)) {
+            $chargeId = null;
+        }
+
         if (! $chargeId) {
-            Log::warning('[OpenPay] Webhook received without charge ID', $payload);
+            Log::warning('[OpenPay] Webhook received without a valid charge ID');
             return new GatewayResponse(
                 status:     PaymentStatus::Pending,
                 reference:  '',
@@ -128,7 +135,7 @@ final class OpenPayGateway implements PaymentGatewayInterface
 
         try {
             $response = Http::withBasicAuth($this->privateKey, '')
-                ->get($this->endpoint("/charges/{$chargeId}"));
+                ->get($this->endpoint('/charges/' . rawurlencode($chargeId)));
 
             if (! $response->successful()) {
                 Log::error('[OpenPay] handleWebhook: charge lookup failed', [
@@ -165,8 +172,9 @@ final class OpenPayGateway implements PaymentGatewayInterface
 
     public function validateWebhook(Request $request): bool
     {
+        // P-02: falla cerrado. Sin usuario y contraseña configurados nada pasa, salvo opt-in explícito.
         if (empty($this->webhookUser) && empty($this->webhookPassword)) {
-            return true;
+            return $this->allowUnsignedWebhooks;
         }
 
         $user = $request->getUser();

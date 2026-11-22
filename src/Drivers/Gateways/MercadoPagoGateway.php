@@ -44,6 +44,8 @@ final class MercadoPagoGateway implements PaymentGatewayInterface
         private readonly string $failureUrl = '',
         private readonly string $pendingUrl = '',
         private readonly string $notificationUrl = '',
+        /** P-02: sin secreto, el webhook se rechaza. Solo para desarrollo, aceptarlo sin firma exige este opt-in. */
+        private readonly bool $allowUnsignedWebhooks = false,
     ) {}
 
     public function createIntent(PaymentIntentData $data): GatewayResponse
@@ -112,8 +114,13 @@ final class MercadoPagoGateway implements PaymentGatewayInterface
         // payment from the API rather than trusting the webhook body.
         $paymentId = $payload['data']['id'] ?? $payload['id'] ?? null;
 
+        // P-04: el id se concatena en la URL de la API con el token adjunto; solo se aceptan dígitos.
+        if (! is_int($paymentId) && ! is_string($paymentId) || ! preg_match('/^\d+$/', (string) $paymentId)) {
+            $paymentId = null;
+        }
+
         if (! $paymentId) {
-            Log::warning('[MercadoPago] Webhook received without payment ID', $payload);
+            Log::warning('[MercadoPago] Webhook received without a valid payment ID');
             return new GatewayResponse(
                 status:     PaymentStatus::Pending,
                 reference:  '',
@@ -123,7 +130,7 @@ final class MercadoPagoGateway implements PaymentGatewayInterface
 
         try {
             $response = Http::withToken($this->accessToken)
-                ->get(self::API_BASE . "/v1/payments/{$paymentId}");
+                ->get(self::API_BASE . '/v1/payments/' . rawurlencode((string) $paymentId));
 
             if (! $response->successful()) {
                 Log::error('[MercadoPago] handleWebhook: payment lookup failed', [
@@ -166,8 +173,9 @@ final class MercadoPagoGateway implements PaymentGatewayInterface
      */
     public function validateWebhook(Request $request): bool
     {
+        // P-02: falla cerrado. Un secreto vacío (variable de entorno mal escrita) nunca deja pasar peticiones.
         if (empty($this->webhookSecret)) {
-            return true;
+            return $this->allowUnsignedWebhooks;
         }
 
         $xSignature = $request->header('x-signature', '');

@@ -47,6 +47,8 @@ class FakeGateway implements PaymentGatewayInterface
 
     public function handleWebhook(array $payload): GatewayResponse
     {
+        $this->assertAvailable();
+
         return new GatewayResponse(
             status: PaymentStatus::Captured,
             reference: $payload['reference'],
@@ -56,6 +58,19 @@ class FakeGateway implements PaymentGatewayInterface
 
     public function validateWebhook(Request $request): bool
     {
-        return true;
+        // P-03: fuera de local/testing nadie puede confirmar pagos con este gateway.
+        return $this->isAvailable();
+    }
+
+    private function isAvailable(): bool
+    {
+        return app()->environment('local', 'testing');
+    }
+
+    private function assertAvailable(): void
+    {
+        if (! $this->isAvailable()) {
+            throw new \RuntimeException('FakeGateway cannot process webhooks outside local/testing.');
+        }
     }
 }
