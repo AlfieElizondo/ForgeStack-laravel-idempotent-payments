@@ -33,4 +33,9 @@ final readonly class GatewayResponse
     {
         return $this->status === PaymentStatus::Failed;
     }
+
+    public function isRefunded(): bool
+    {
+        return $this->status === PaymentStatus::Refunded;
+    }
 }

@@ -213,9 +213,10 @@ final class MercadoPagoGateway implements PaymentGatewayInterface
             'in_process',
             'authorized'    => PaymentStatus::Pending,
             'rejected',
-            'cancelled',
+            'cancelled'     => PaymentStatus::Failed,
+            // S-08: un reembolso o contracargo no es un rechazo: el cobro existió y se devolvió.
             'refunded',
-            'charged_back'  => PaymentStatus::Failed,
+            'charged_back'  => PaymentStatus::Refunded,
             default         => PaymentStatus::Pending,
         };
     }

@@ -200,8 +200,8 @@ final class OpenPayGateway implements PaymentGatewayInterface
             'completed'               => PaymentStatus::Captured,
             'charge_pending',
             'in_progress'             => PaymentStatus::Pending,
-            'failed', 'cancelled',
-            'refunded', 'chargeback'  => PaymentStatus::Failed,
+            'failed', 'cancelled'     => PaymentStatus::Failed,
+            'refunded', 'chargeback'  => PaymentStatus::Refunded,
             default                   => PaymentStatus::Pending,
         };
     }
