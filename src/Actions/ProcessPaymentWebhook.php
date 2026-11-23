@@ -8,6 +8,7 @@ use ForgeStack\IdempotentPayments\Contracts\PaymentGatewayInterface;
 use ForgeStack\IdempotentPayments\Enums\PaymentStatus;
 use ForgeStack\IdempotentPayments\Events\PaymentCaptured;
 use ForgeStack\IdempotentPayments\Events\PaymentFailed;
+use ForgeStack\IdempotentPayments\Events\PaymentRefunded;
 use ForgeStack\IdempotentPayments\Models\PaymentEvent;
 use ForgeStack\IdempotentPayments\Models\PaymentIntent;
 use Illuminate\Database\UniqueConstraintViolationException;
@@ -91,7 +92,24 @@ final class ProcessPaymentWebhook
 
             // P-08: solo Captured y Refunded son terminales. Un rechazo no lo es: en Checkout Pro el
             // comprador puede reintentar con otra tarjeta y la aprobación llega después (Failed → Captured).
+            // S-08: un reembolso o contracargo después de la captura sí cambia el intent (una sola vez).
+            if ($intent->status === PaymentStatus::Captured && $response->isRefunded()) {
+                $intent->update([
+                    'status'           => PaymentStatus::Refunded,
+                    'gateway_response' => $response->rawPayload,
+                ]);
+
+                PaymentRefunded::dispatch($intent);
+
+                return;
+            }
+
             if ($intent->status === PaymentStatus::Captured || $intent->status === PaymentStatus::Refunded) {
+                return;
+            }
+
+            // Un aviso de reembolso para un cobro que nunca se capturó no cambia nada.
+            if ($response->isRefunded()) {
                 return;
             }
 

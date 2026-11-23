@@ -14,6 +14,7 @@ use ForgeStack\IdempotentPayments\Drivers\Gateways\MercadoPagoGateway;
 use ForgeStack\IdempotentPayments\Enums\PaymentStatus;
 use ForgeStack\IdempotentPayments\Events\PaymentCaptured;
 use ForgeStack\IdempotentPayments\Events\PaymentFailed;
+use ForgeStack\IdempotentPayments\Events\PaymentRefunded;
 use ForgeStack\IdempotentPayments\Models\PaymentIntent;
 use ForgeStack\IdempotentPayments\Tests\TestCase;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -164,5 +165,56 @@ class WebhookReconciliationTest extends TestCase
                 return true;
             }
         };
+    }
+
+    public function test_a_refund_after_a_capture_marks_the_intent_refunded_and_dispatches_an_event(): void
+    {
+        // S-08: Captured ya no es sordo a reembolsos y contracargos.
+        $intent = $this->fakeIntent();
+        Event::fake([PaymentCaptured::class, PaymentFailed::class, PaymentRefunded::class]);
+
+        $this->deliver($intent, 'evt-approved', PaymentStatus::Captured);
+        $this->deliver($intent, 'evt-refunded', PaymentStatus::Refunded);
+
+        $this->assertSame(PaymentStatus::Refunded, $intent->fresh()->status);
+        Event::assertDispatchedTimes(PaymentRefunded::class, 1);
+        Event::assertNotDispatched(PaymentFailed::class);
+    }
+
+    public function test_a_refund_notice_for_an_intent_that_was_never_captured_changes_nothing(): void
+    {
+        $intent = $this->fakeIntent();
+        Event::fake([PaymentRefunded::class, PaymentFailed::class]);
+
+        $this->deliver($intent, 'evt-refunded', PaymentStatus::Refunded);
+
+        $this->assertSame(PaymentStatus::Pending, $intent->fresh()->status);
+        Event::assertNotDispatched(PaymentRefunded::class);
+        Event::assertNotDispatched(PaymentFailed::class);
+    }
+
+    public function test_a_repeated_refund_notice_dispatches_the_event_once(): void
+    {
+        $intent = $this->fakeIntent();
+        Event::fake([PaymentRefunded::class]);
+
+        $this->deliver($intent, 'evt-approved', PaymentStatus::Captured);
+        $this->deliver($intent, 'evt-refunded-1', PaymentStatus::Refunded);
+        $this->deliver($intent, 'evt-refunded-2', PaymentStatus::Refunded);
+
+        Event::assertDispatchedTimes(PaymentRefunded::class, 1);
+    }
+
+    public function test_mercadopago_refunds_and_chargebacks_map_to_refunded(): void
+    {
+        $gateway = new MercadoPagoGateway(accessToken: 'TEST-token', webhookSecret: 'secret');
+
+        foreach (['refunded' => 1, 'charged_back' => 2] as $mpStatus => $id) {
+            Http::fake(["api.mercadopago.com/v1/payments/{$id}" => Http::response(['id' => $id, 'status' => $mpStatus, 'external_reference' => 'x'])]);
+
+            $response = $gateway->handleWebhook(['type' => 'payment', 'data' => ['id' => (string) $id]]);
+
+            $this->assertSame(PaymentStatus::Refunded, $response->status, $mpStatus);
+        }
     }
 }
