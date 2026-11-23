@@ -6,6 +6,7 @@ namespace ForgeStack\IdempotentPayments\Actions;
 
 use ForgeStack\IdempotentPayments\Contracts\PaymentGatewayInterface;
 use ForgeStack\IdempotentPayments\Enums\PaymentStatus;
+use ForgeStack\IdempotentPayments\Events\PaymentAmountMismatch;
 use ForgeStack\IdempotentPayments\Events\PaymentCaptured;
 use ForgeStack\IdempotentPayments\Events\PaymentFailed;
 use ForgeStack\IdempotentPayments\Events\PaymentRefunded;
@@ -117,6 +118,19 @@ final class ProcessPaymentWebhook
                 return; // otro rechazo: PaymentFailed ya se despachó
             }
 
+            // S-09: una aprobación por otro monto u otra moneda no se captura.
+            if ($response->isSuccessful() && ! self::amountMatches($intent, $response)) {
+                Log::warning('[IdempotentPayments] Paid amount does not match the intent; not captured', [
+                    'intent'   => $intent->public_id,
+                    'expected' => $intent->amount . ' ' . $intent->currency,
+                    'paid'     => $response->paidAmount . ' ' . $response->paidCurrency,
+                ]);
+
+                PaymentAmountMismatch::dispatch($intent, (string) $response->paidAmount, $response->paidCurrency);
+
+                return;
+            }
+
             if ($response->isSuccessful()) {
                 $intent->update([
                     'status'           => PaymentStatus::Captured,
@@ -135,5 +149,23 @@ final class ProcessPaymentWebhook
             }
             // Pending → don't mutate; wait for the next event.
         });
+    }
+
+    /** Sin monto reportado no hay con qué comparar; con monto, se compara en centavos y la moneda sin distinguir mayúsculas. */
+    private static function amountMatches(PaymentIntent $intent, \ForgeStack\IdempotentPayments\DTOs\GatewayResponse $response): bool
+    {
+        if ($response->paidAmount === null) {
+            return true;
+        }
+
+        if (! is_numeric($response->paidAmount)) {
+            return false;
+        }
+
+        $sameAmount = (int) round((float) $response->paidAmount * 100) === (int) round((float) $intent->amount * 100);
+        $sameCurrency = $response->paidCurrency === null
+            || strtoupper($response->paidCurrency) === strtoupper((string) $intent->currency);
+
+        return $sameAmount && $sameCurrency;
     }
 }
