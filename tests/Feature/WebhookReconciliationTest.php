@@ -12,6 +12,7 @@ use ForgeStack\IdempotentPayments\DTOs\PaymentIntentData;
 use ForgeStack\IdempotentPayments\Drivers\Gateways\FakeGateway;
 use ForgeStack\IdempotentPayments\Drivers\Gateways\MercadoPagoGateway;
 use ForgeStack\IdempotentPayments\Enums\PaymentStatus;
+use ForgeStack\IdempotentPayments\Events\PaymentAmountMismatch;
 use ForgeStack\IdempotentPayments\Events\PaymentCaptured;
 use ForgeStack\IdempotentPayments\Events\PaymentFailed;
 use ForgeStack\IdempotentPayments\Events\PaymentRefunded;
@@ -216,5 +217,87 @@ class WebhookReconciliationTest extends TestCase
 
             $this->assertSame(PaymentStatus::Refunded, $response->status, $mpStatus);
         }
+    }
+
+    private function deliverPaid(PaymentIntent $intent, string $eventId, ?string $amount, ?string $currency): void
+    {
+        $gateway = new class($intent->provider_reference, $amount, $currency) implements PaymentGatewayInterface
+        {
+            public function __construct(private string $reference, private ?string $amount, private ?string $currency) {}
+
+            public function createIntent(PaymentIntentData $data): GatewayResponse
+            {
+                throw new \LogicException('no se usa');
+            }
+
+            public function handleWebhook(array $payload): GatewayResponse
+            {
+                return new GatewayResponse(status: PaymentStatus::Captured, reference: $this->reference, paidAmount: $this->amount, paidCurrency: $this->currency);
+            }
+
+            public function validateWebhook(Request $request): bool
+            {
+                return true;
+            }
+        };
+
+        (new ProcessPaymentWebhook())->execute([
+            'gateway' => $gateway, 'provider' => 'stub', 'event_id' => $eventId, 'event_type' => 'payment', 'payload' => [],
+        ]);
+    }
+
+    public function test_an_approval_for_a_different_amount_is_not_captured(): void
+    {
+        // S-09: el intent es de 500.00 MXN; la pasarela reporta 5.00.
+        $intent = $this->fakeIntent();
+        Event::fake([PaymentCaptured::class, PaymentAmountMismatch::class]);
+
+        $this->deliverPaid($intent, 'evt-1', '5.00', 'MXN');
+
+        $this->assertSame(PaymentStatus::Pending, $intent->fresh()->status);
+        Event::assertNotDispatched(PaymentCaptured::class);
+        Event::assertDispatched(PaymentAmountMismatch::class, fn ($e) => $e->paidAmount === '5.00' && $e->paidCurrency === 'MXN');
+    }
+
+    public function test_an_approval_in_a_different_currency_is_not_captured(): void
+    {
+        $intent = $this->fakeIntent();
+        Event::fake([PaymentCaptured::class, PaymentAmountMismatch::class]);
+
+        $this->deliverPaid($intent, 'evt-1', '500.00', 'USD');
+
+        $this->assertSame(PaymentStatus::Pending, $intent->fresh()->status);
+        Event::assertDispatched(PaymentAmountMismatch::class);
+    }
+
+    public function test_an_approval_for_the_exact_amount_is_captured_even_without_decimals(): void
+    {
+        $intent = $this->fakeIntent();
+        Event::fake([PaymentCaptured::class, PaymentAmountMismatch::class]);
+
+        $this->deliverPaid($intent, 'evt-1', '500', 'mxn');
+
+        $this->assertSame(PaymentStatus::Captured, $intent->fresh()->status);
+        Event::assertNotDispatched(PaymentAmountMismatch::class);
+    }
+
+    public function test_a_gateway_that_does_not_report_the_amount_still_captures(): void
+    {
+        $intent = $this->fakeIntent();
+        Event::fake([PaymentCaptured::class]);
+
+        $this->deliverPaid($intent, 'evt-1', null, null);
+
+        $this->assertSame(PaymentStatus::Captured, $intent->fresh()->status);
+    }
+
+    public function test_mercadopago_reports_the_paid_amount_and_currency(): void
+    {
+        Http::fake(['api.mercadopago.com/v1/payments/7' => Http::response(['id' => 7, 'status' => 'approved', 'transaction_amount' => 1740.5, 'currency_id' => 'MXN', 'external_reference' => 'x'])]);
+
+        $response = (new MercadoPagoGateway(accessToken: 'TEST-token', webhookSecret: 'secret'))->handleWebhook(['type' => 'payment', 'data' => ['id' => '7']]);
+
+        $this->assertSame('1740.5', $response->paidAmount);
+        $this->assertSame('MXN', $response->paidCurrency);
     }
 }

@@ -17,6 +17,9 @@ final readonly class GatewayResponse
         // P-11: public_id del intent cuando la pasarela lo devuelve (external_reference en Mercado Pago).
         // Tiene prioridad sobre $reference para encontrar el intent: el id del pago no es el de la preferencia.
         public ?string       $intentPublicId = null,
+        // S-09: monto y moneda que la pasarela dice que se cobraron (null si no los reporta).
+        public ?string       $paidAmount = null,
+        public ?string       $paidCurrency = null,
     ) {}
 
     public function isSuccessful(): bool

@@ -154,6 +154,8 @@ final class MercadoPagoGateway implements PaymentGatewayInterface
                 intentPublicId: isset($payment['external_reference']) && $payment['external_reference'] !== ''
                     ? (string) $payment['external_reference']
                     : null,
+                paidAmount:     isset($payment['transaction_amount']) ? (string) $payment['transaction_amount'] : null,
+                paidCurrency:   isset($payment['currency_id']) ? (string) $payment['currency_id'] : null,
             );
 
         } catch (Throwable $e) {
