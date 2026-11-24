@@ -46,6 +46,8 @@ final class MercadoPagoGateway implements PaymentGatewayInterface
         private readonly string $notificationUrl = '',
         /** P-02: sin secreto, el webhook se rechaza. Solo para desarrollo, aceptarlo sin firma exige este opt-in. */
         private readonly bool $allowUnsignedWebhooks = false,
+        /** P-07: antigüedad máxima de la firma en segundos. 0 = sin límite (comportamiento anterior). */
+        private readonly int $signatureToleranceSeconds = 0,
     ) {}
 
     public function createIntent(PaymentIntentData $data): GatewayResponse
@@ -186,7 +188,7 @@ final class MercadoPagoGateway implements PaymentGatewayInterface
 
         $xSignature = $request->header('x-signature', '');
         $xRequestId = $request->header('x-request-id', '');
-        $dataId     = (string) $request->input('data.id', '');
+        $dataId     = $this->signedDataId($request);
 
         $parts = [];
         foreach (explode(',', $xSignature) as $part) {
@@ -201,10 +203,46 @@ final class MercadoPagoGateway implements PaymentGatewayInterface
             return false;
         }
 
+        if (! $this->isFresh($ts)) {
+            return false;
+        }
+
         $manifest = "id:{$dataId};request-id:{$xRequestId};ts:{$ts};";
         $expected = hash_hmac('sha256', $manifest, $this->webhookSecret);
 
         return hash_equals($expected, $v1);
+    }
+
+    /**
+     * P-12: Mercado Pago firma el `data.id` del query string, en minúsculas. PHP convierte el
+     * parámetro `data.id` de la URL en `data_id`, así que se lee del query string crudo; el
+     * cuerpo queda solo como respaldo (los avisos de orden comercial no lo traen).
+     */
+    private function signedDataId(Request $request): string
+    {
+        $query = (string) $request->server('QUERY_STRING', '');
+
+        if (preg_match('/(?:^|&)data\.id=([^&]*)/', $query, $match) === 1) {
+            return mb_strtolower(rawurldecode($match[1]));
+        }
+
+        return mb_strtolower((string) $request->input('data.id', ''));
+    }
+
+    /** P-07: `ts` puede venir en segundos o en milisegundos; con tolerancia 0 no se comprueba. */
+    private function isFresh(string $ts): bool
+    {
+        if ($this->signatureToleranceSeconds <= 0) {
+            return true;
+        }
+
+        if (! ctype_digit($ts)) {
+            return false;
+        }
+
+        $seconds = strlen($ts) > 11 ? intdiv((int) $ts, 1000) : (int) $ts;
+
+        return abs(time() - $seconds) <= $this->signatureToleranceSeconds;
     }
 
     private function mapStatus(string $mpStatus): PaymentStatus

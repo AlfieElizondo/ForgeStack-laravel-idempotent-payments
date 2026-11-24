@@ -71,6 +71,70 @@ class FailClosedGatewaysTest extends TestCase
         $this->assertFalse($gateway->validateWebhook($this->mpRequest('123', 'otro-secreto')));
     }
 
+    // ---------- P-12 · data.id viene en la URL ----------
+
+    private function mpQueryRequest(string $query, array $body, string $signedId, string $secret, string $ts = '1700000000'): Request
+    {
+        $v1 = hash_hmac('sha256', "id:{$signedId};request-id:req-1;ts:{$ts};", $secret);
+        $request = Request::create('/webhook?'.$query, 'POST', $body);
+        $request->server->set('QUERY_STRING', $query);
+        $request->headers->set('x-signature', "ts={$ts},v1={$v1}");
+        $request->headers->set('x-request-id', 'req-1');
+
+        return $request;
+    }
+
+    public function test_mercadopago_signs_the_data_id_from_the_query_string_when_the_body_has_none(): void
+    {
+        // Aviso real de orden comercial (2026-11-22): el cuerpo no trae data.id; solo la URL.
+        $gateway = new MercadoPagoGateway(accessToken: 'tok', webhookSecret: 's3cret');
+        $request = $this->mpQueryRequest('data.id=46345223683&type=topic_merchant_order_wh', ['data' => ['status' => 'opened']], '46345223683', 's3cret');
+
+        $this->assertTrue($gateway->validateWebhook($request));
+    }
+
+    public function test_mercadopago_prefers_the_query_string_id_over_the_body(): void
+    {
+        $gateway = new MercadoPagoGateway(accessToken: 'tok', webhookSecret: 's3cret');
+        $request = $this->mpQueryRequest('data.id=111&type=payment', ['data' => ['id' => '999']], '111', 's3cret');
+
+        $this->assertTrue($gateway->validateWebhook($request));
+    }
+
+    public function test_mercadopago_lowercases_an_alphanumeric_data_id_before_signing(): void
+    {
+        $gateway = new MercadoPagoGateway(accessToken: 'tok', webhookSecret: 's3cret');
+        $request = $this->mpQueryRequest('data.id=ABC123&type=payment', [], 'abc123', 's3cret');
+
+        $this->assertTrue($gateway->validateWebhook($request));
+    }
+
+    // ---------- P-07 · tolerancia de tiempo ----------
+
+    public function test_mercadopago_rejects_an_old_signature_when_a_tolerance_is_configured(): void
+    {
+        $gateway = new MercadoPagoGateway(accessToken: 'tok', webhookSecret: 's3cret', signatureToleranceSeconds: 600);
+
+        $this->assertFalse($gateway->validateWebhook($this->mpRequest('123', 's3cret', ts: (string) (time() - 3600))));
+        $this->assertTrue($gateway->validateWebhook($this->mpRequest('123', 's3cret', ts: (string) time())));
+    }
+
+    public function test_mercadopago_accepts_the_timestamp_in_seconds_or_milliseconds(): void
+    {
+        $gateway = new MercadoPagoGateway(accessToken: 'tok', webhookSecret: 's3cret', signatureToleranceSeconds: 600);
+
+        $this->assertTrue($gateway->validateWebhook($this->mpRequest('123', 's3cret', ts: (string) (time() * 1000))));
+        $this->assertFalse($gateway->validateWebhook($this->mpRequest('123', 's3cret', ts: (string) ((time() - 3600) * 1000))));
+    }
+
+    public function test_mercadopago_without_a_tolerance_keeps_the_previous_behaviour(): void
+    {
+        // Sin el parámetro (Europharma) no cambia nada: la idempotencia ya neutraliza repeticiones.
+        $gateway = new MercadoPagoGateway(accessToken: 'tok', webhookSecret: 's3cret');
+
+        $this->assertTrue($gateway->validateWebhook($this->mpRequest('123', 's3cret', ts: '1700000000')));
+    }
+
     // ---------- P-02 · Openpay ----------
 
     public function test_openpay_rejects_webhooks_when_credentials_are_empty(): void
